@@ -1,0 +1,85 @@
+# Utiliser l'image de base Debian Buster
+FROM debian:buster
+
+# Ajouter le dépôt MySQL officiel et sa clé GPG
+RUN apt-get update && apt-get install -y wget lsb-release gnupg && \
+    wget https://dev.mysql.com/get/mysql-apt-config_0.8.13-1_all.deb && \
+    DEBIAN_FRONTEND=noninteractive dpkg -i mysql-apt-config_0.8.13-1_all.deb && \
+    rm mysql-apt-config_0.8.13-1_all.deb && \
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys B7B3B788A8D3785C && \
+    sed -i 's/mysql-8.0/mysql-5.7/' /etc/apt/sources.list.d/mysql.list && \
+    apt-get update
+
+# Configurer debconf pour éviter les invites interactives pendant l'installation de MySQL
+RUN echo "mysql-community-server mysql-community-server/root-pass password ''" | debconf-set-selections && \
+    echo "mysql-community-server mysql-community-server/re-root-pass password ''" | debconf-set-selections
+
+# Installer Apache, MySQL, PHP et autres dépendances
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    apache2 \
+    mysql-server \
+    php \
+    php-mysql \
+    php-cli \
+    php-gd \
+    php-json \
+    php-curl \
+    php-xml \
+    unzip \
+    libapache2-mod-fcgid
+
+# Activer le module fcgid pour Apache
+RUN a2enmod fcgid
+
+# Télécharger et installer WordPress
+RUN wget https://wordpress.org/latest.tar.gz && \
+    tar -xzf latest.tar.gz && \
+    rm latest.tar.gz && \
+    mv wordpress /var/www/html/
+
+# Télécharger et installer phpMyAdmin
+RUN wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz && \
+    tar -xzf phpMyAdmin-latest-all-languages.tar.gz && \
+    rm phpMyAdmin-latest-all-languages.tar.gz && \
+    mv phpMyAdmin-*-all-languages /var/www/html/phpmyadmin
+
+# Supprimer les fichiers existants du répertoire de données de MySQL et initialiser MySQL
+RUN rm -rf /var/lib/mysql/* && mysqld --initialize-insecure --user=mysql
+
+# Créer un script SQL pour initialiser la base de données WordPress
+RUN echo "CREATE DATABASE wordpress;" > /tmp/init.sql && \
+    echo "CREATE USER 'wp_user'@'localhost' IDENTIFIED BY 'password';" >> /tmp/init.sql && \
+    echo "GRANT ALL PRIVILEGES ON wordpress.* TO 'wp_user'@'localhost';" >> /tmp/init.sql && \
+    echo "FLUSH PRIVILEGES;" >> /tmp/init.sql
+
+# Démarrer MySQL temporairement et exécuter le script SQL
+RUN mysqld_safe --skip-networking & \
+    sleep 5 && \
+    mysql < /tmp/init.sql && \
+    mysqladmin shutdown
+
+# Supprimer le script SQL après utilisation
+RUN rm -f /tmp/init.sql
+
+# Configurer Apache pour WordPress et phpMyAdmin
+COPY ./wordpress.conf /etc/apache2/sites-available/wordpress.conf
+COPY ./phpmyadmin.conf /etc/apache2/sites-available/phpmyadmin.conf
+
+RUN a2ensite wordpress.conf && \
+    a2ensite phpmyadmin.conf && \
+    a2enmod rewrite
+
+# Activer/désactiver l'index automatique en fonction de la variable d'environnement
+ENV AUTO_INDEX="on"
+RUN if [ "$AUTO_INDEX" = "on" ]; then \
+        sed -i 's/Options Indexes FollowSymLinks/Options FollowSymLinks/' /etc/apache2/apache2.conf; \
+    fi
+
+# Permissions
+RUN chown -R www-data:www-data /var/www/html/wordpress /var/www/html/phpmyadmin
+
+# Exposer le port 80 pour accéder au serveur
+EXPOSE 80
+
+# Lancer Apache et MySQL au démarrage
+CMD service mysql start && apachectl -D FOREGROUND
